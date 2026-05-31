@@ -43,38 +43,49 @@
   /* ======================================================================
      SECTION: WORKER POOL (parallel Monte Carlo)
      ====================================================================== */
-  var pool = [];
-  var msgId = 0;
-  var waiting = {}; // id -> { resolve }
+ var pool = [];
+var msgId = 0;
+var waiting = {}; // id -> { resolve, reject }
 
-  function buildPool() {
-    teardownPool();
-    for (var i = 0; i < POOL_SIZE; i++) {
-      var w = new Worker('js/sim-worker.js');
-      w.onmessage = onPoolMessage;
-      w.onerror = function (err) { showError('Worker: ' + (err.message || 'siehe Konsole')); };
-      pool.push(w);
-    }
+function buildPool() {
+  teardownPool();  // sicherheitshalber vorher alles killen
+  for (var i = 0; i < POOL_SIZE; i++) {
+    var w = new Worker('js/sim-worker.js');
+    w.onmessage = onPoolMessage;
+    w.onerror = function (err) { showError('Worker: ' + (err.message || 'siehe Konsole')); };
+    pool.push(w);
   }
-  function teardownPool() {
-    pool.forEach(function (w) { w.terminate(); });
-    pool = [];
-    waiting = {};
-  }
-  function onPoolMessage(e) {
-    var m = e.data, slot = waiting[m.id];
-    if (!slot) return;
-    if (m.type === 'result') { delete waiting[m.id]; slot.resolve(m); }
-    else if (m.type === 'analyzeResult') { delete waiting[m.id]; slot.resolve(m.results); }
-  }
-  function post(worker, msg) {
-    return new Promise(function (resolve) {
-      var id = ++msgId;
-      msg.id = id;
-      waiting[id] = { resolve: resolve };
-      worker.postMessage(msg);
-    });
-  }
+}
+function teardownPool() {
+  // alle offenen Promises mit einem Abbruch-Fehler beenden
+  Object.keys(waiting).forEach(function (id) {
+    waiting[id].reject(new Error('Cancelled'));
+  });
+  waiting = {};
+  pool.forEach(function (w) { w.terminate(); });
+  pool = [];
+}
+function onPoolMessage(e) {
+  var m = e.data, slot = waiting[m.id];
+  if (!slot) return;
+  if (m.type === 'result') { delete waiting[m.id]; slot.resolve(m); }
+  else if (m.type === 'analyzeResult') { delete waiting[m.id]; slot.resolve(m.results); }
+}
+function post(worker, msg) {
+  return new Promise(function (resolve, reject) {
+    var id = ++msgId;
+    msg.id = id;
+    waiting[id] = { resolve: resolve, reject: reject };
+    worker.postMessage(msg);
+  });
+}
+
+// cancelAllWork – jetzt radikal
+function cancelAllWork() {
+  gen++;
+  teardownPool();
+  buildPool();
+}
 
   // Split nGames across the whole pool and aggregate.
   function parallelSim(fen, nGames) {
@@ -231,27 +242,28 @@
     $['legend'].classList.remove('show');
   }
   function placeCircle(square, prob) {
-    var sqEl = document.querySelector('#board [data-square="' + square + '"]');
-    if (!sqEl) return;
-    var bRect = document.getElementById('board').getBoundingClientRect();
-    var sqRect = sqEl.getBoundingClientRect();
-    var size = Math.min(sqRect.width, sqRect.height) * 0.6;
-    var c = document.createElement('div');
-    c.className = 'mc-circle';
-    c.style.width = size + 'px'; c.style.height = size + 'px';
-    c.style.left = ((sqRect.left - bRect.left) + (sqRect.width - size) / 2) + 'px';
-    c.style.top  = ((sqRect.top - bRect.top) + (sqRect.height - size) / 2) + 'px';
-    c.style.background = probToColor(prob);
-    c.textContent = (prob * 100).toFixed(0);
-    document.getElementById('analysis-overlay').appendChild(c);
-  }
+  var sqEl = document.getElementById(square);
+  if (!sqEl) return;
+  var bRect = document.getElementById('board').getBoundingClientRect();
+  var sqRect = sqEl.getBoundingClientRect();
+  var size = Math.min(sqRect.width, sqRect.height) * 0.6;
+  var c = document.createElement('div');
+  c.className = 'mc-circle';
+  c.style.width = size + 'px'; c.style.height = size + 'px';
+  c.style.left = ((sqRect.left - bRect.left) + (sqRect.width - size) / 2) + 'px';
+  c.style.top  = ((sqRect.top - bRect.top) + (sqRect.height - size) / 2) + 'px';
+  c.style.background = probToColor(prob);
+  c.textContent = (prob * 100).toFixed(0);
+  document.getElementById('analysis-overlay').appendChild(c);
+}
   function showPickupHeatmap(fromSquare) {
-    clearOverlay();
-    var entries = heatmapByFrom[fromSquare];
-    if (!entries || !entries.length) return;
-    $['legend'].classList.add('show');
-    entries.forEach(function (e) { placeCircle(e.to, e.pSide); });
-  }
+  clearOverlay();
+  if (!heatmapReady) return;   // ← neu: nichts zeigen, wenn Heatmap noch nicht bereit
+  var entries = heatmapByFrom[fromSquare];
+  if (!entries || !entries.length) return;
+  $['legend'].classList.add('show');
+  entries.forEach(function (e) { placeCircle(e.to, e.pSide); });
+}
   function showFullHeatmap() {
     clearOverlay();
     if (!heatmapList.length) return;
@@ -357,57 +369,61 @@
      SECTION: SIMULATION DRIVERS
      ====================================================================== */
   function simulateTopRight() {
-    var fen = game.fen(), myGen = gen, ply = game.history().length;
-    setStatus('');
-    setProgress('Simuliere (' + pool.length + ' Threads) …');
-    return parallelSim(fen, SIM_GAMES).then(function (res) {
-      if (gen !== myGen) return;
-      updateProbabilityUI(res.pWhite, res.pDraw, res.pBlack);
-      probHistory[ply] = res.pWhite;
-      setProgress('Fertig — ' + res.total + ' Partien auf ' + pool.length + ' Threads simuliert.');
-      setExplain(
-        'Aus der aktuellen Stellung wurden <strong>' + res.total + '</strong> zufällige Partien zu Ende ' +
-        'gespielt (parallel auf <strong>' + pool.length + '</strong> Threads). Weiß gewann <strong>' +
-        res.whiteWins + '</strong>, Schwarz <strong>' + res.blackWins + '</strong>, <strong>' + res.draws +
-        '</strong> remis — das sind die <strong>Monte-Carlo-Wahrscheinlichkeiten</strong>.'
-      );
-      renderTree();
-    });
-  }
+  var fen = game.fen(), myGen = gen, ply = game.history().length;
+  setStatus('');
+  setProgress('Simuliere (' + pool.length + ' Threads) …');
+  return parallelSim(fen, SIM_GAMES).then(function (res) {
+    if (gen !== myGen) return;
+    updateProbabilityUI(res.pWhite, res.pDraw, res.pBlack);
+    probHistory[ply] = res.pWhite;
+    setProgress('Fertig — ' + res.total + ' Partien auf ' + pool.length + ' Threads simuliert.');
+    setExplain(
+      'Aus der aktuellen Stellung wurden <strong>' + res.total + '</strong> zufällige Partien zu Ende ' +
+      'gespielt (parallel auf <strong>' + pool.length + '</strong> Threads). Weiß gewann <strong>' +
+      res.whiteWins + '</strong>, Schwarz <strong>' + res.blackWins + '</strong>, <strong>' + res.draws +
+      '</strong> remis — das sind die <strong>Monte-Carlo-Wahrscheinlichkeiten</strong>.'
+    );
+    renderTree();
+  }).catch(function (err) {
+    if (err.message !== 'Cancelled') showError(err);
+  });
+}
 
-  function computeHeatmap() {
-    if (game.game_over() || !isHuman(game.turn())) {
-      heatmapReady = false;
-      setHeatmapState(game.game_over() ? '—' : 'Bot am Zug — keine Heatmap.');
-      return;
-    }
-    var moves = game.moves({ verbose: true });
-    if (!moves.length) return;
+function computeHeatmap() {
+  if (game.game_over() || !isHuman(game.turn())) {
     heatmapReady = false;
-    setHeatmapState('Heatmap (' + pool.length + ' Threads) …');
-
-    var whiteToMove = game.turn() === 'w', ply = game.history().length;
-    var jobs = moves.map(function (mv) {
-      game.move(mv); var fen = game.fen(); game.undo();
-      return { key: mv.from + mv.to, from: mv.from, to: mv.to, san: mv.san, fen: fen };
-    });
-
-    var myGen = gen;
-    parallelAnalyze(jobs, HEATMAP_GAMES).then(function (results) {
-      if (gen !== myGen) return;
-      heatmapList = results.map(function (r) {
-        return { from: r.from, to: r.to, san: r.san, pWhite: r.pWhite, pDraw: r.pDraw, pBlack: r.pBlack,
-                 pSide: whiteToMove ? r.pWhite : r.pBlack };
-      });
-      heatmapByFrom = {};
-      heatmapList.forEach(function (e) { (heatmapByFrom[e.from] = heatmapByFrom[e.from] || []).push(e); });
-      candidateSnapshots[ply] = heatmapList.map(function (e) { return { san: e.san, pSide: e.pSide }; });
-      heatmapReady = true;
-      setHeatmapState('Heatmap bereit — Figur anfassen oder „Gesamte Heatmap“.');
-      renderTree();
-      refreshOverlay();
-    }).catch(showError);
+    setHeatmapState(game.game_over() ? '—' : 'Bot am Zug — keine Heatmap.');
+    return;
   }
+  var moves = game.moves({ verbose: true });
+  if (!moves.length) return;
+  heatmapReady = false;
+  setHeatmapState('Heatmap (' + pool.length + ' Threads) …');
+
+  var whiteToMove = game.turn() === 'w', ply = game.history().length;
+  var jobs = moves.map(function (mv) {
+    game.move(mv); var fen = game.fen(); game.undo();
+    return { key: mv.from + mv.to, from: mv.from, to: mv.to, san: mv.san, fen: fen };
+  });
+
+  var myGen = gen;
+  parallelAnalyze(jobs, HEATMAP_GAMES).then(function (results) {
+    if (gen !== myGen) return;
+    heatmapList = results.map(function (r) {
+      return { from: r.from, to: r.to, san: r.san, pWhite: r.pWhite, pDraw: r.pDraw, pBlack: r.pBlack,
+               pSide: whiteToMove ? r.pWhite : r.pBlack };
+    });
+    heatmapByFrom = {};
+    heatmapList.forEach(function (e) { (heatmapByFrom[e.from] = heatmapByFrom[e.from] || []).push(e); });
+    candidateSnapshots[ply] = heatmapList.map(function (e) { return { san: e.san, pSide: e.pSide }; });
+    heatmapReady = true;
+    setHeatmapState('Heatmap bereit — Figur anfassen oder „Gesamte Heatmap“.');
+    renderTree();
+    refreshOverlay();
+  }).catch(function (err) {
+    if (err.message !== 'Cancelled') showError(err);
+  });
+}
 
   /* ======================================================================
      SECTION: POSITION-CHANGE PIPELINE + BOT LOOP
