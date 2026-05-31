@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<!--
+  Schach-Wahrscheinlichkeiten — Monte-Carlo-Simulation
+  MIT License. See README.md.
+-->
+<html lang="de">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Schach-Wahrscheinlichkeiten — Monte-Carlo-Simulation</title>
+
+  <!-- chessboard.js v1.0.0 stylesheet (board UI) -->
+  <link
+    rel="stylesheet"
+    href="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.css"
+    crossorigin="anonymous"
+    referrerpolicy="no-referrer" />
+
+  <!-- App styles -->
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+
+<body>
+  <div class="wrap">
+    <header>
+      <h1>Schach-Wahrscheinlichkeiten</h1>
+      <div class="subtitle">Monte-Carlo-Simulation &nbsp;•&nbsp; Hot-Seat (beide Seiten spielbar)</div>
+    </header>
+
+    <div class="layout">
+      <!-- ================= LEFT: CHESSBOARD ================= -->
+      <div class="board-col">
+        <div class="board-stage">
+          <div id="board"></div>
+          <!-- Heatmap circles are injected here -->
+          <div id="analysis-overlay"></div>
+        </div>
+        <div class="hint" id="board-hint">
+          Tipp: Eine Figur anfassen, um die Gewinn-Heatmap der möglichen Züge zu sehen.
+        </div>
+      </div>
+
+      <!-- ================= RIGHT: CONTROL PANEL ================= -->
+      <div class="panel-col">
+        <!-- Probability card -->
+        <div class="card">
+          <h2>Gewinn-Wahrscheinlichkeit <span class="turn-pill" id="turn-pill">Weiß am Zug</span></h2>
+
+          <div class="prob-text" id="prob-text">
+            <span class="pw">White wins: 0.0%</span> |
+            <span class="pd">Draw: 0.0%</span> |
+            <span class="pb">Black wins: 0.0%</span>
+          </div>
+
+          <div class="prob-bar" id="prob-bar">
+            <div class="seg seg-white" id="seg-white" style="width:33.3%"></div>
+            <div class="seg seg-draw"  id="seg-draw"  style="width:33.3%"></div>
+            <div class="seg seg-black" id="seg-black" style="width:33.4%"></div>
+          </div>
+
+          <div class="progress" id="progress">Bereit.</div>
+          <div class="status-msg" id="status-msg"></div>
+
+          <div class="legend" id="legend">
+            <span>0%</span>
+            <span class="bar"></span>
+            <span>100% (Farbe am Zug)</span>
+          </div>
+        </div>
+
+        <!-- Actions card -->
+        <div class="card">
+          <h2>Aktionen</h2>
+          <div class="btn-row">
+            <button class="primary" id="btn-heatmap">Gesamte Heatmap</button>
+            <button id="btn-reset">Neues Spiel</button>
+          </div>
+          <div class="hint" id="heatmap-state">Heatmap wird im Hintergrund berechnet …</div>
+        </div>
+
+        <!-- Explanation card -->
+        <div class="card">
+          <h2>Was passiert hier?</h2>
+          <div class="explain" id="explain">
+            Eine <strong>Monte-Carlo-Simulation</strong> spielt von der aktuellen
+            Stellung aus sehr viele zufällige Partien zu Ende und zählt, wie oft
+            Weiß gewinnt, Schwarz gewinnt oder remis. Die relativen Häufigkeiten
+            ergeben die Wahrscheinlichkeiten. Alles läuft in einem
+            <strong>Web&nbsp;Worker</strong>, damit das Brett flüssig bleibt.
+          </div>
+        </div>
+      </div>
+    </div>
+
+    <!-- ================= BELOW THE BOARD: TWO TILES ================= -->
+    <div class="tiles">
+      <!-- LEFT TILE: decision tree -->
+      <div class="card tile">
+        <h2>Entscheidungsbaum</h2>
+        <div class="tile-sub">Gespielter Pfad + Kandidatenzüge mit Wahrscheinlichkeit</div>
+        <div id="decision-tree" class="tree"></div>
+      </div>
+
+      <!-- RIGHT TILE: game as a hash -->
+      <div class="card tile">
+        <h2>Partie als Hash</h2>
+        <div class="tile-sub">Alphanumerische Beschreibung, Wahrscheinlichkeit &amp; Knack-Sicherheit</div>
+
+        <div class="kv">
+          <div class="k">PGN</div>
+          <div class="v mono" id="game-pgn">—</div>
+        </div>
+        <div class="kv">
+          <div class="k">FEN</div>
+          <div class="v mono" id="game-fen">—</div>
+        </div>
+        <div class="kv">
+          <div class="k">Pfad-Wahrscheinlichkeit</div>
+          <div class="v" id="game-prob">—</div>
+        </div>
+        <div class="kv">
+          <div class="k">Entropie</div>
+          <div class="v" id="game-entropy">—</div>
+        </div>
+        <div class="kv">
+          <div class="k">SHA-256</div>
+          <div class="v mono hash" id="game-hash">—</div>
+        </div>
+        <div class="kv">
+          <div class="k">Zeit zum Knacken</div>
+          <div class="v" id="game-crack">—</div>
+        </div>
+        <div class="tile-foot" id="crack-note"></div>
+      </div>
+    </div>
+
+    <footer>
+      Open-Source • MIT License • chessboard.js + chess.js + jQuery (CDN)
+    </footer>
+  </div>
+
+  <!-- ============================ LIBRARIES ============================ -->
+  <!-- jQuery is a hard runtime dependency of chessboard.js v1.0.0 -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/jquery/3.7.1/jquery.min.js"
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <!-- chess.js v0.10.2 (game logic, legal moves, FEN, termination) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chess.js/0.10.2/chess.min.js"
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <!-- chessboard.js v1.0.0 (board UI, drag & drop) -->
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/chessboard-js/1.0.0/chessboard-1.0.0.min.js"
+          crossorigin="anonymous" referrerpolicy="no-referrer"></script>
+
+  <!-- App logic -->
+  <script src="js/app.js"></script>
+</body>
+</html>

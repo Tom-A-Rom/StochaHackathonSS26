@@ -1,0 +1,249 @@
+/* ============================================================================
+   Schach-Wahrscheinlichkeiten — styles
+   Clean modern dark theme.  MIT License.
+   ========================================================================== */
+:root {
+  --bg:        #14161c;
+  --panel:     #1d2029;
+  --panel-2:   #262a36;
+  --text:      #e6e8ee;
+  --muted:     #9aa3b2;
+  --accent:    #5b8cff;
+  --border:    #353b4a;
+  --white-seg: #f0f0f0;
+  --draw-seg:  #888888;
+  --black-seg: #2c2c2c;
+}
+
+* { box-sizing: border-box; }
+
+body {
+  margin: 0;
+  background: radial-gradient(1200px 800px at 20% -10%, #1c2030 0%, var(--bg) 60%);
+  color: var(--text);
+  font-family: "Segoe UI", "Inter", system-ui, -apple-system, Roboto, Helvetica, Arial, sans-serif;
+  line-height: 1.5;
+  min-height: 100vh;
+}
+
+.wrap { max-width: 1100px; margin: 0 auto; padding: 28px 24px 60px; }
+
+header h1 { margin: 0; font-size: 30px; font-weight: 700; letter-spacing: 0.3px; }
+header .subtitle { margin: 4px 0 24px; color: var(--muted); font-size: 16px; font-weight: 500; }
+
+/* Two-column layout: board | control panel */
+.layout { display: flex; gap: 28px; align-items: flex-start; flex-wrap: wrap; }
+.board-col { flex: 0 0 auto; }
+
+/* The board container is fixed 500px (overlay layer sits on top) */
+.board-stage { position: relative; width: 500px; height: 500px; }
+#board {
+  width: 500px;
+  box-shadow: 0 10px 40px rgba(0,0,0,0.45);
+  border-radius: 6px;
+  overflow: hidden;
+}
+.hint { margin-top: 10px; font-size: 12.5px; color: var(--muted); }
+
+/* Overlay layer for heatmap circles. pointer-events:none so the board
+   drag/drop underneath still works. */
+#analysis-overlay { position: absolute; inset: 0; pointer-events: none; z-index: 20; }
+.mc-circle {
+  position: absolute;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 50%;
+  font-size: 12px;
+  font-weight: 700;
+  color: #0b0d12;
+  text-shadow: 0 1px 1px rgba(255,255,255,0.4);
+  border: 2px solid rgba(255,255,255,0.7);
+  box-shadow: 0 2px 6px rgba(0,0,0,0.45);
+  opacity: 0.92;
+}
+
+/* Control panel */
+.panel-col { flex: 1 1 360px; min-width: 340px; }
+.card {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 20px;
+  margin-bottom: 18px;
+}
+.card h2 {
+  margin: 0 0 14px;
+  font-size: 16px;
+  font-weight: 600;
+  color: var(--text);
+  text-transform: uppercase;
+  letter-spacing: 0.6px;
+  display: flex;
+  align-items: center;
+  gap: 10px;
+}
+
+/* Turn indicator pill */
+.turn-pill {
+  font-size: 11px;
+  font-weight: 700;
+  text-transform: none;
+  letter-spacing: 0;
+  padding: 3px 9px;
+  border-radius: 999px;
+  background: var(--panel-2);
+  border: 1px solid var(--border);
+  color: var(--muted);
+}
+.turn-pill.white { background: #f0f0f0; color: #14161c; border-color: #f0f0f0; }
+.turn-pill.black { background: #2c2c2c; color: #e6e8ee; border-color: #555; }
+
+/* Probability numbers */
+.prob-text { font-size: 15px; font-weight: 600; margin-bottom: 10px; font-variant-numeric: tabular-nums; }
+.prob-text .pw { color: #ffffff; }
+.prob-text .pd { color: #c8c8c8; }
+.prob-text .pb { color: #9aa3b2; }
+
+/* Stacked probability bar */
+.prob-bar {
+  display: flex;
+  width: 100%;
+  height: 30px;
+  border-radius: 6px;
+  overflow: hidden;
+  border: 1px solid var(--border);
+  background: #0d0f14;
+}
+.seg {
+  height: 100%;
+  transition: width 0.45s ease;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 11px;
+  font-weight: 700;
+  overflow: hidden;
+  white-space: nowrap;
+}
+.seg-white { background: var(--white-seg); color: #14161c; border-right: 1px solid var(--border); }
+.seg-draw  { background: var(--draw-seg);  color: #14161c; border-right: 1px solid var(--border); }
+.seg-black { background: var(--black-seg);  color: #e6e8ee; }
+
+/* Progress / status */
+.progress {
+  margin-top: 12px;
+  font-size: 13px;
+  color: var(--accent);
+  min-height: 18px;
+  font-variant-numeric: tabular-nums;
+}
+.status-msg { margin-top: 8px; font-size: 14px; font-weight: 600; min-height: 18px; }
+.status-msg.win  { color: #6fe3a1; }
+.status-msg.lose { color: #ff7a7a; }
+.status-msg.draw { color: #ffd479; }
+.status-msg.err  { color: #ff7a7a; }
+
+/* Buttons */
+.btn-row { display: flex; gap: 10px; flex-wrap: wrap; margin-top: 4px; }
+button {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  padding: 10px 16px;
+  font-size: 14px;
+  font-weight: 600;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease, transform 0.05s ease, opacity 0.15s ease;
+}
+button:hover:not(:disabled) { background: #303544; }
+button:active:not(:disabled) { transform: translateY(1px); }
+button:disabled { opacity: 0.45; cursor: not-allowed; }
+button.primary { background: var(--accent); border-color: var(--accent); color: #0b0d12; }
+button.primary:hover:not(:disabled) { background: #74a0ff; }
+button.active { background: #6fe3a1; border-color: #6fe3a1; color: #0b0d12; }
+
+/* Explanation text */
+.explain { font-size: 13.5px; color: var(--muted); line-height: 1.6; }
+.explain strong { color: var(--text); }
+
+/* Legend for the analysis gradient */
+.legend { display: none; align-items: center; gap: 10px; margin-top: 14px; font-size: 12px; color: var(--muted); }
+.legend.show { display: flex; }
+.legend .bar {
+  flex: 1;
+  height: 12px;
+  border-radius: 6px;
+  background: linear-gradient(90deg, hsl(0,70%,50%) 0%, hsl(60,70%,50%) 50%, hsl(120,70%,50%) 100%);
+  border: 1px solid var(--border);
+}
+
+/* ============================================================================
+   TILES BELOW THE BOARD
+   ========================================================================== */
+.tiles { display: flex; gap: 18px; margin-top: 6px; align-items: stretch; flex-wrap: wrap; }
+.tile { flex: 1 1 420px; min-width: 320px; margin-bottom: 0; }
+.tile-sub { font-size: 12.5px; color: var(--muted); margin: -8px 0 14px; }
+.tile-foot { font-size: 12px; color: var(--muted); margin-top: 12px; line-height: 1.5; }
+
+/* --- Decision tree (left tile) --- */
+.tree { font-size: 13.5px; }
+.tree .node {
+  position: relative;
+  padding: 4px 0 4px 18px;
+  border-left: 2px solid var(--border);
+  margin-left: 8px;
+}
+.tree .node:before {
+  content: "";
+  position: absolute;
+  left: -2px; top: 14px;
+  width: 14px; height: 2px;
+  background: var(--border);
+}
+.tree .root { border-left: none; margin-left: 0; padding-left: 0; }
+.tree .root:before { display: none; }
+.tree .ply { color: var(--muted); font-variant-numeric: tabular-nums; }
+.tree .san { font-weight: 700; }
+.tree .san.w { color: #ffffff; }
+.tree .san.b { color: #c0c6d4; }
+.tree .pct { color: var(--accent); font-variant-numeric: tabular-nums; }
+.tree .candidates { margin-top: 6px; }
+.tree .cand {
+  position: relative;
+  padding: 3px 0 3px 18px;
+  border-left: 2px dashed var(--border);
+  margin-left: 8px;
+  color: var(--muted);
+}
+.tree .cand:before {
+  content: "";
+  position: absolute;
+  left: -2px; top: 13px;
+  width: 14px; height: 2px;
+  background: var(--border);
+}
+.tree .cand .dot {
+  display: inline-block;
+  width: 9px; height: 9px;
+  border-radius: 50%;
+  margin-right: 7px;
+  vertical-align: baseline;
+  border: 1px solid rgba(255,255,255,0.5);
+}
+.tree .cand.best { color: var(--text); }
+.tree .cand-head { font-size: 12px; color: var(--muted); margin: 4px 0 2px 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+
+/* --- Game-as-hash (right tile) --- */
+.kv { display: grid; grid-template-columns: 150px 1fr; gap: 8px 14px; padding: 7px 0; border-bottom: 1px solid rgba(53,59,74,0.5); }
+.kv:last-of-type { border-bottom: none; }
+.kv .k { color: var(--muted); font-size: 12.5px; padding-top: 1px; }
+.kv .v { font-size: 13.5px; word-break: break-word; }
+.mono { font-family: "JetBrains Mono", "Fira Code", ui-monospace, Menlo, Consolas, monospace; }
+.v.hash { color: #6fe3a1; font-size: 12px; letter-spacing: 0.2px; }
+.v.mono#game-pgn, .v.mono#game-fen { font-size: 12px; color: #cfd5e2; }
+
+footer { margin-top: 30px; color: var(--muted); font-size: 12px; text-align: center; }
+a { color: var(--accent); }
