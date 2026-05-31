@@ -71,6 +71,20 @@
         <!-- Actions card -->
         <div class="card">
           <h2>Aktionen</h2>
+          <label class="field">
+            <span>Spielmodus</span>
+            <select id="mode-select">
+              <option value="hvh">Mensch vs Mensch</option>
+              <option value="hvb">Mensch (Weiß) vs Bot</option>
+              <option value="bvb">Bot vs Bot</option>
+            </select>
+          </label>
+          <div class="hint mode-help">
+            <strong>Bot</strong> = Minimax (Suchtiefe 2, reine Materialbewertung:
+            Bauer&nbsp;1, Springer/Läufer&nbsp;3, Turm&nbsp;5, Dame&nbsp;9). Er
+            zieht nach kurzer Bedenkzeit. Die Heatmap wird nur an menschlichen
+            Zügen berechnet.
+          </div>
           <div class="btn-row">
             <button class="primary" id="btn-heatmap">Gesamte Heatmap</button>
             <button id="btn-reset">Neues Spiel</button>
@@ -94,11 +108,13 @@
 
     <!-- ================= BELOW THE BOARD: TWO TILES ================= -->
     <div class="tiles">
-      <!-- LEFT TILE: decision tree -->
+      <!-- LEFT TILE: decision tree (canvas, zoom + pan) -->
       <div class="card tile">
-        <h2>Entscheidungsbaum</h2>
-        <div class="tile-sub">Gespielter Pfad + Kandidatenzüge mit Wahrscheinlichkeit</div>
-        <div id="decision-tree" class="tree"></div>
+        <h2>Entscheidungsbaum
+          <button id="btn-tree-reset" class="mini-btn">Ansicht zentrieren</button>
+        </h2>
+        <div class="tile-sub">Gespielter Pfad (hell, mittig) · Alternativen ausgegraut · Mausrad = Zoom, Ziehen = Verschieben</div>
+        <canvas id="tree-canvas" class="tree-canvas"></canvas>
       </div>
 
       <!-- RIGHT TILE: game as a hash -->
@@ -153,6 +169,7 @@
           crossorigin="anonymous" referrerpolicy="no-referrer"></script>
 
   <!-- App logic -->
+  <script src="js/tree.js"></script>
   <script src="js/app.js"></script>
 </body>
 </html>
