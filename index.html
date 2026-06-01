@@ -27,6 +27,34 @@
       <div class="subtitle">Monte-Carlo-Simulation &nbsp;•&nbsp; Hot-Seat (beide Seiten spielbar)</div>
     </header>
 
+    <!-- ============ FULL-WIDTH PROBABILITY BANNER (above board + panel) ============ -->
+    <div class="card prob-banner">
+      <div class="prob-banner-head">
+        <h2>Gewinn-Wahrscheinlichkeit <span class="turn-pill" id="turn-pill">Weiß am Zug</span></h2>
+        <div class="prob-text" id="prob-text">
+          <span class="pw">White wins: 0.0%</span> |
+          <span class="pd">Draw: 0.0%</span> |
+          <span class="pb">Black wins: 0.0%</span>
+        </div>
+      </div>
+
+      <div class="prob-bar" id="prob-bar">
+        <div class="seg seg-white" id="seg-white" style="width:33.3%"></div>
+        <div class="seg seg-draw"  id="seg-draw"  style="width:33.3%"></div>
+        <div class="seg seg-black" id="seg-black" style="width:33.4%"></div>
+      </div>
+
+      <div class="prob-banner-foot">
+        <div class="progress" id="progress">Bereit.</div>
+        <div class="status-msg" id="status-msg"></div>
+        <div class="legend" id="legend">
+          <span>0%</span>
+          <span class="bar"></span>
+          <span>100% (Farbe am Zug)</span>
+        </div>
+      </div>
+    </div>
+
     <div class="layout">
       <!-- ================= LEFT: CHESSBOARD ================= -->
       <div class="board-col">
@@ -42,35 +70,27 @@
 
       <!-- ================= RIGHT: CONTROL PANEL ================= -->
       <div class="panel-col">
-        <!-- Probability card -->
-        <div class="card">
-          <h2>Gewinn-Wahrscheinlichkeit <span class="turn-pill" id="turn-pill">Weiß am Zug</span></h2>
-
-          <div class="prob-text" id="prob-text">
-            <span class="pw">White wins: 0.0%</span> |
-            <span class="pd">Draw: 0.0%</span> |
-            <span class="pb">Black wins: 0.0%</span>
-          </div>
-
-          <div class="prob-bar" id="prob-bar">
-            <div class="seg seg-white" id="seg-white" style="width:33.3%"></div>
-            <div class="seg seg-draw"  id="seg-draw"  style="width:33.3%"></div>
-            <div class="seg seg-black" id="seg-black" style="width:33.4%"></div>
-          </div>
-
-          <div class="progress" id="progress">Bereit.</div>
-          <div class="status-msg" id="status-msg"></div>
-
-          <div class="legend" id="legend">
-            <span>0%</span>
-            <span class="bar"></span>
-            <span>100% (Farbe am Zug)</span>
-          </div>
-        </div>
-
         <!-- Actions card -->
         <div class="card">
           <h2>Aktionen</h2>
+          <label class="field">
+            <span>Datenquelle (Wahrscheinlichkeiten &amp; Heatmap)</span>
+            <select id="source-select">
+              <option value="lichess-live">Lichess · Cloud-Eval (live)</option>
+              <option value="lichess-file">Lichess · Cloud-Eval (Datei)</option>
+              <option value="mc-live">Monte-Carlo · live simuliert</option>
+            </select>
+          </label>
+          <div class="hint mode-help">
+            <strong>Lichess · Cloud-Eval</strong> holt die gecachte Stockfish-Bewertung
+            von <code>lichess.org/api/cloud-eval</code> und rechnet sie in
+            Gewinnchancen um — sofort, zeigt die Top-Engine-Züge. <em>Nur für in der
+            Cloud gespeicherte Stellungen</em> (Eröffnung/Hauptvarianten); sonst
+            keine Daten. <strong>Datei</strong> = dieselben Daten offline
+            (<code>tools/fetch-lichess-tree.js</code>). <strong>Monte-Carlo</strong>
+            simuliert live in Web Workers — funktioniert für <em>jede</em> Stellung
+            ohne externe API.
+          </div>
           <label class="field">
             <span>Spielmodus</span>
             <select id="mode-select">

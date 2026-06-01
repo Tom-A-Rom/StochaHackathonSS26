@@ -1,8 +1,20 @@
 /* ============================================================================
-   app.js — UI, game modes (bot/human), parallel Monte Carlo, heatmap, tree
+   app.js — UI, game modes, and a switchable WIN/DRAW/LOSS data source
    ----------------------------------------------------------------------------
-   Simulation runs across a POOL of Web Workers (one per core, capped) so it is
-   fast and never blocks the board.
+   Three interchangeable sources feed the top-right probability, the per-move
+   heatmap and the decision tree (pick one with the "Datenquelle" selector):
+
+     1. lichess-live  — fetch precomputed real-game stats from the open Lichess
+                        opening-explorer API (CC0). Instant, huge coverage.
+     2. lichess-file  — same data, pre-downloaded into data/lichess-tree.json
+                        by tools/fetch-lichess-tree.js. Fully offline.
+     3. mc-live       — our own LIVE Monte-Carlo simulation in a Web Worker pool
+                        (truncated random playouts). Slower, but it is real,
+                        on-the-fly stochastic simulation.
+
+   Every source resolves to the same shape so the rest of the app doesn't care:
+     { ok:true, sim:{pWhite,pDraw,pBlack}, moves:[{san,uci,from,to,pWhite,pDraw,pBlack}] }
+   or { ok:false, reason:'nodata'|'unavailable', message? }.
 
    MIT License.
    ========================================================================== */
@@ -11,17 +23,25 @@
   'use strict';
 
   /* ======================================================================
-     SECTION: CONFIG & STATE
+     CONFIG & STATE
      ====================================================================== */
-  var SIM_GAMES     = 800;  // Monte Carlo games for the top-right probability
-  var HEATMAP_GAMES = 120;  // games per candidate move for the heatmap
-  var CRACK_RATE    = 1e9;  // assumed brute-force guesses / second
-  var BOT_DEPTH     = 2;    // minimax search depth
-  var BOT_DELAY_MS  = 350;  // pause before a bot move (so you can watch)
+  var SIM_GAMES     = 600;   // Monte-Carlo games for the position (mc-live)
+  var HEATMAP_GAMES = 80;    // games per candidate move for the heatmap (mc-live)
+  var CRACK_RATE    = 1e9;   // assumed brute-force guesses / second
+  var BOT_DEPTH     = 2;     // minimax search depth
+  var BOT_DELAY_MS  = 350;   // pause before a bot move (so you can watch)
   var PIECE_VALUE   = { p: 1, n: 3, b: 3, r: 5, q: 9, k: 0 };
-  var POOL_SIZE     = Math.max(1, Math.min(8, (navigator.hardwareConcurrency || 4)));
+  var POOL_SIZE     = Math.max(1, Math.min(16, (navigator.hardwareConcurrency || 4)));
 
-  var MODE = 'hvb';          // 'hvh' | 'hvb' (human=White) | 'bvb'
+  var MODE   = 'hvb';          // 'hvh' | 'hvb' (human=White) | 'bvb'
+  var SOURCE = 'lichess-live'; // 'lichess-live' | 'lichess-file' | 'mc-live'
+                               // lichess-live = Stockfish cloud-eval on lichess.org (instant, cached).
+                               // mc-live = our own simulation, works for ANY position with no external API.
+  var SOURCE_LABEL = {
+    'lichess-live': 'Lichess · live',
+    'lichess-file': 'Lichess · Datei',
+    'mc-live':      'Monte-Carlo · live'
+  };
 
   var game, board, treeView;
   var gen = 0;               // generation token; bumped whenever the position changes
@@ -39,60 +59,48 @@
     if (MODE === 'bvb') return false;
     return color === 'w'; // hvb: human plays White
   }
+  function posKey(fen) { return fen.split(' ').slice(0, 4).join(' '); }
+  function split(w, d, b) { var t = (w + d + b) || 1; return { pWhite: w / t, pDraw: d / t, pBlack: b / t }; }
+  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
 
   /* ======================================================================
-     SECTION: WORKER POOL (parallel Monte Carlo)
+     WORKER POOL — only used by the mc-live source
      ====================================================================== */
- var pool = [];
-var msgId = 0;
-var waiting = {}; // id -> { resolve, reject }
+  var pool = [], msgId = 0, waiting = {};
 
-function buildPool() {
-  teardownPool();  // sicherheitshalber vorher alles killen
-  for (var i = 0; i < POOL_SIZE; i++) {
-    var w = new Worker('js/sim-worker.js');
-    w.onmessage = onPoolMessage;
-    w.onerror = function (err) { showError('Worker: ' + (err.message || 'siehe Konsole')); };
-    pool.push(w);
+  function ensurePool() {
+    if (pool.length) return;
+    for (var i = 0; i < POOL_SIZE; i++) {
+      var w = new Worker('js/sim-worker.js');
+      w.onmessage = onPoolMessage;
+      w.onerror = function (err) { showError('Worker: ' + (err.message || 'siehe Konsole')); };
+      pool.push(w);
+    }
   }
-}
-function teardownPool() {
-  // alle offenen Promises mit einem Abbruch-Fehler beenden
-  Object.keys(waiting).forEach(function (id) {
-    waiting[id].reject(new Error('Cancelled'));
-  });
-  waiting = {};
-  pool.forEach(function (w) { w.terminate(); });
-  pool = [];
-}
-function onPoolMessage(e) {
-  var m = e.data, slot = waiting[m.id];
-  if (!slot) return;
-  if (m.type === 'result') { delete waiting[m.id]; slot.resolve(m); }
-  else if (m.type === 'analyzeResult') { delete waiting[m.id]; slot.resolve(m.results); }
-}
-function post(worker, msg) {
-  return new Promise(function (resolve, reject) {
-    var id = ++msgId;
-    msg.id = id;
-    waiting[id] = { resolve: resolve, reject: reject };
-    worker.postMessage(msg);
-  });
-}
-
-// cancelAllWork – jetzt radikal
-function cancelAllWork() {
-  gen++;
-  teardownPool();
-  buildPool();
-}
-
-  // Split nGames across the whole pool and aggregate.
+  function teardownPool() {
+    Object.keys(waiting).forEach(function (id) { waiting[id].reject(new Error('Cancelled')); });
+    waiting = {};
+    pool.forEach(function (w) { w.terminate(); });
+    pool = [];
+  }
+  function onPoolMessage(e) {
+    var m = e.data, slot = waiting[m.id];
+    if (!slot) return;
+    if (m.type === 'result') { delete waiting[m.id]; slot.resolve(m); }
+    else if (m.type === 'analyzeResult') { delete waiting[m.id]; slot.resolve(m.results); }
+  }
+  function post(worker, msg) {
+    return new Promise(function (resolve, reject) {
+      var id = ++msgId; msg.id = id;
+      waiting[id] = { resolve: resolve, reject: reject };
+      worker.postMessage(msg);
+    });
+  }
   function parallelSim(fen, nGames) {
     var k = pool.length, base = Math.floor(nGames / k), rem = nGames % k, proms = [];
     for (var i = 0; i < k; i++) {
       var n = base + (i < rem ? 1 : 0);
-      if (n > 0) proms.push(post(pool[i], { cmd: 'sim', fen: fen, nGames: n, progressEvery: 0 }));
+      if (n > 0) proms.push(post(pool[i], { cmd: 'sim', fen: fen, nGames: n }));
     }
     return Promise.all(proms).then(function (rs) {
       var w = 0, b = 0, d = 0;
@@ -101,8 +109,6 @@ function cancelAllWork() {
       return { whiteWins: w, blackWins: b, draws: d, pWhite: w / t, pDraw: d / t, pBlack: b / t, total: t };
     });
   }
-
-  // Distribute candidate-move jobs across the pool.
   function parallelAnalyze(jobs, gamesPerJob) {
     var k = pool.length, buckets = [], i;
     for (i = 0; i < k; i++) buckets.push([]);
@@ -111,26 +117,129 @@ function cancelAllWork() {
       return b.length ? post(pool[idx], { cmd: 'analyze', jobs: b, nGames: gamesPerJob })
                       : Promise.resolve([]);
     });
-    return Promise.all(proms).then(function (rs) {
-      return Array.prototype.concat.apply([], rs);
+    return Promise.all(proms).then(function (rs) { return Array.prototype.concat.apply([], rs); });
+  }
+
+  /* ======================================================================
+     DATA SOURCES
+     ====================================================================== */
+  // --- Lichess cloud evaluation (Stockfish, cached) → win chances ---
+  // explorer.lichess.ovh is a separate host (often network-blocked); the
+  // cloud-eval endpoint lives on lichess.org itself and returns a cached engine
+  // evaluation (centipawns / mate) plus the top lines, which we convert into a
+  // white/draw/black split and a per-move heatmap. Only cached positions exist,
+  // so off-book positions return 'nodata'.
+  function evalToWhiteScore(pv) {              // -> White's expected score in [0,1]
+    if (typeof pv.mate === 'number') return pv.mate > 0 ? 0.995 : 0.005;
+    return 1 / (1 + Math.exp(-0.00368208 * (pv.cp || 0)));
+  }
+  function scoreToWDL(E) {                      // split expected score into W/D/L
+    var adv = Math.abs(2 * E - 1);             // 0 = balanced, 1 = decisive
+    var d = 0.45 * Math.pow(1 - adv, 1.3);     // more draws when balanced
+    var w = Math.max(0, E - d / 2), b = Math.max(0, (1 - E) - d / 2);
+    var t = w + b + d || 1;
+    return { pWhite: w / t, pDraw: d / t, pBlack: b / t };
+  }
+
+  var lichessCache = {};
+  function lichessLiveGet(fen) {
+    var key = posKey(fen);
+    if (lichessCache[key]) return Promise.resolve(lichessCache[key]);
+    var url = 'https://lichess.org/api/cloud-eval?multiPv=5&fen=' + encodeURIComponent(fen);
+    return fetch(url).then(function (r) {
+      if (r.status === 404) return null;       // not in the cloud cache
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      if (!j || !j.pvs || !j.pvs.length) {
+        var nod = { ok: false, reason: 'nodata' }; lichessCache[key] = nod; return nod;
+      }
+      var g = new Chess(fen);
+      var moves = j.pvs.map(function (pv) {
+        var uci = (pv.moves || '').split(' ')[0] || '';
+        var from = uci.slice(0, 2), to = uci.slice(2, 4), promo = uci.slice(4) || undefined;
+        var wdl = scoreToWDL(evalToWhiteScore(pv));
+        var san = uci;
+        try { var mv = g.move({ from: from, to: to, promotion: promo }); if (mv) { san = mv.san; g.undo(); } } catch (e) {}
+        return { san: san, uci: uci, from: from, to: to,
+                 pWhite: wdl.pWhite, pDraw: wdl.pDraw, pBlack: wdl.pBlack };
+      });
+      var res = { ok: true, sim: scoreToWDL(evalToWhiteScore(j.pvs[0])),
+                  moves: moves, depth: j.depth };
+      lichessCache[key] = res;
+      return res;
+    }).catch(function (e) {
+      return { ok: false, reason: 'unavailable', message: e.message };
     });
   }
 
-  // Soft-cancel in-flight work: bump the generation so any results that come
-  // back are ignored by their gen guards. The (small, fast) stale jobs simply
-  // drain in the background — far cheaper than tearing down 8 workers each move.
-  function cancelAllWork() { gen++; }
+  // --- Bundled JSON file (Lichess tree). Loaded once, looked up by key. ---
+  var fileTables = {};
+  function loadFile(url) {
+    var t = fileTables[url];
+    if (t) return t.loading;
+    t = fileTables[url] = { table: null, meta: null, err: null, loading: null };
+    t.loading = fetch(url).then(function (r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.json();
+    }).then(function (j) {
+      t.table = j.positions || {}; t.meta = j.meta || {};
+    }).catch(function (e) { t.err = e; t.table = {}; });
+    return t.loading;
+  }
+  function fileGet(url, fen) {
+    return loadFile(url).then(function () {
+      var t = fileTables[url];
+      if (t.err) return { ok: false, reason: 'unavailable',
+        message: 'Datei fehlt — bitte tools/fetch-lichess-tree.js ausführen' };
+      var p = t.table[posKey(fen)];
+      if (!p) return { ok: false, reason: 'nodata' };
+      return { ok: true, sim: p.sim, moves: p.moves || [], depth: p.depth };
+    });
+  }
 
-  function delay(ms) { return new Promise(function (r) { setTimeout(r, ms); }); }
+  // --- Live Monte-Carlo via the worker pool ---
+  function mcLiveGet(fen, opts) {
+    ensurePool();
+    var simP = parallelSim(fen, SIM_GAMES);
+    if (!opts || !opts.wantMoves) {
+      return simP.then(function (s) {
+        return { ok: true, total: s.total, sim: { pWhite: s.pWhite, pDraw: s.pDraw, pBlack: s.pBlack }, moves: [] };
+      });
+    }
+    var g = new Chess(fen), verbose = g.moves({ verbose: true });
+    var jobs = verbose.map(function (mv) {
+      g.move(mv); var f = g.fen(); g.undo();
+      var uci = mv.from + mv.to + (mv.promotion || '');
+      return { key: uci, from: mv.from, to: mv.to, san: mv.san, uci: uci, fen: f };
+    });
+    return Promise.all([simP, parallelAnalyze(jobs, HEATMAP_GAMES)]).then(function (arr) {
+      var s = arr[0], results = arr[1], byKey = {};
+      results.forEach(function (r) { byKey[r.key] = r; });
+      var moves = jobs.map(function (j) {
+        var r = byKey[j.key] || { pWhite: 0, pDraw: 0, pBlack: 0 };
+        return { san: j.san, uci: j.uci, from: j.from, to: j.to,
+                 pWhite: r.pWhite, pDraw: r.pDraw, pBlack: r.pBlack };
+      });
+      return { ok: true, total: s.total, sim: { pWhite: s.pWhite, pDraw: s.pDraw, pBlack: s.pBlack }, moves: moves };
+    });
+  }
+
+  // --- Dispatch ---
+  function getPosition(fen, opts) {
+    if (SOURCE === 'lichess-live') return lichessLiveGet(fen);
+    if (SOURCE === 'lichess-file') return fileGet('data/lichess-tree.json', fen);
+    return mcLiveGet(fen, opts);
+  }
 
   /* ======================================================================
-     SECTION: DOM HELPERS
+     DOM HELPERS
      ====================================================================== */
   var $ = {};
   function cacheDom() {
     ['progress','status-msg','prob-text','seg-white','seg-draw','seg-black',
      'explain','legend','turn-pill','board-hint','heatmap-state',
-     'btn-heatmap','btn-reset','btn-tree-reset','mode-select','tree-canvas',
+     'btn-heatmap','btn-reset','btn-tree-reset','mode-select','source-select','tree-canvas',
      'game-pgn','game-fen','game-prob','game-entropy','game-hash','game-crack','crack-note']
       .forEach(function (id) { $[id] = document.getElementById(id); });
   }
@@ -147,6 +256,11 @@ function cancelAllWork() {
       '<span class="pw">White wins: ' + w.toFixed(1) + '%</span> | ' +
       '<span class="pd">Draw: ' + d.toFixed(1) + '%</span> | ' +
       '<span class="pb">Black wins: ' + b.toFixed(1) + '%</span>';
+  }
+  function setProbUnknown() {
+    $['seg-white'].style.width = '33.33%'; $['seg-draw'].style.width = '33.34%'; $['seg-black'].style.width = '33.33%';
+    $['seg-white'].textContent = ''; $['seg-draw'].textContent = '?'; $['seg-black'].textContent = '';
+    $['prob-text'].innerHTML = '<span class="pw">—</span> | <span class="pd">keine Daten</span> | <span class="pb">—</span>';
   }
 
   function setProgress(t) { $['progress'].textContent = t; }
@@ -169,17 +283,13 @@ function cancelAllWork() {
   }
 
   /* ======================================================================
-     SECTION: BOT (minimax depth 2, material only)
+     BOT (minimax depth 2, material only) — independent of the data source
      ====================================================================== */
-  // Material balance from the FEN piece placement (uppercase = White).
-  // We parse the FEN instead of g.board(), which isn't exposed in this build.
   function evaluateMaterial(g) {
     var placement = g.fen().split(' ')[0], score = 0;
     for (var i = 0; i < placement.length; i++) {
       var ch = placement.charAt(i), lower = ch.toLowerCase();
-      if (PIECE_VALUE.hasOwnProperty(lower)) {
-        score += (ch === lower ? -1 : 1) * PIECE_VALUE[lower];
-      }
+      if (PIECE_VALUE.hasOwnProperty(lower)) score += (ch === lower ? -1 : 1) * PIECE_VALUE[lower];
     }
     return score;
   }
@@ -215,7 +325,7 @@ function cancelAllWork() {
   }
 
   /* ======================================================================
-     SECTION: GAME-OVER
+     GAME-OVER
      ====================================================================== */
   function handleGameOver() {
     if (!game.game_over()) return false;
@@ -233,59 +343,64 @@ function cancelAllWork() {
   }
 
   /* ======================================================================
-     SECTION: HEATMAP OVERLAY
+     HEATMAP OVERLAY — soft, glowing, animated discs
      ====================================================================== */
-  function probToColor(p) { return 'hsl(' + (p * 120).toFixed(0) + ', 70%, 50%)'; }
+  function probToColor(p) { return 'hsl(' + (p * 120).toFixed(0) + ', 78%, 48%)'; }
 
   function clearOverlay() {
     document.getElementById('analysis-overlay').innerHTML = '';
     $['legend'].classList.remove('show');
   }
-  function placeCircle(square, prob) {
-  var sqEl = document.getElementById(square);
-  if (!sqEl) return;
-  var bRect = document.getElementById('board').getBoundingClientRect();
-  var sqRect = sqEl.getBoundingClientRect();
-  var size = Math.min(sqRect.width, sqRect.height) * 0.6;
-  var c = document.createElement('div');
-  c.className = 'mc-circle';
-  c.style.width = size + 'px'; c.style.height = size + 'px';
-  c.style.left = ((sqRect.left - bRect.left) + (sqRect.width - size) / 2) + 'px';
-  c.style.top  = ((sqRect.top - bRect.top) + (sqRect.height - size) / 2) + 'px';
-  c.style.background = probToColor(prob);
-  c.textContent = (prob * 100).toFixed(0);
-  document.getElementById('analysis-overlay').appendChild(c);
-}
+  function placeCircle(square, prob, isBest, idx) {
+    var boardEl = document.getElementById('board');
+    var sqEl = boardEl.querySelector('[data-square="' + square + '"]');
+    if (!sqEl) return;
+    var bRect = boardEl.getBoundingClientRect(), sqRect = sqEl.getBoundingClientRect();
+    var base = Math.min(sqRect.width, sqRect.height);
+    var size = base * (0.5 + 0.28 * prob);             // stronger moves grow larger
+    var color = probToColor(prob);
+    var c = document.createElement('div');
+    c.className = 'mc-circle' + (isBest ? ' best' : '');
+    c.style.width = size + 'px'; c.style.height = size + 'px';
+    c.style.left = ((sqRect.left - bRect.left) + (sqRect.width - size) / 2) + 'px';
+    c.style.top  = ((sqRect.top - bRect.top) + (sqRect.height - size) / 2) + 'px';
+    c.style.setProperty('--c', color);
+    c.style.fontSize = Math.max(10, Math.round(base * 0.17)) + 'px';
+    c.style.animationDelay = ((idx || 0) * 16) + 'ms';
+    c.innerHTML = '<span class="pct">' + Math.round(prob * 100) + '</span>';
+    document.getElementById('analysis-overlay').appendChild(c);
+  }
+  function renderCircles(pairs) {           // pairs: [{sq, p}]
+    if (!pairs.length) return;
+    $['legend'].classList.add('show');
+    var best = -1; pairs.forEach(function (e) { if (e.p > best) best = e.p; });
+    pairs.forEach(function (e, i) { placeCircle(e.sq, e.p, e.p === best, i); });
+  }
   function showPickupHeatmap(fromSquare) {
-  clearOverlay();
-  if (!heatmapReady) return;   // ← neu: nichts zeigen, wenn Heatmap noch nicht bereit
-  var entries = heatmapByFrom[fromSquare];
-  if (!entries || !entries.length) return;
-  $['legend'].classList.add('show');
-  entries.forEach(function (e) { placeCircle(e.to, e.pSide); });
-}
+    clearOverlay();
+    if (!heatmapReady) return;
+    var entries = heatmapByFrom[fromSquare];
+    if (!entries || !entries.length) return;
+    renderCircles(entries.map(function (e) { return { sq: e.to, p: e.pSide }; }));
+  }
   function showFullHeatmap() {
     clearOverlay();
     if (!heatmapList.length) return;
-    $['legend'].classList.add('show');
     var best = {};
     heatmapList.forEach(function (e) { if (best[e.to] === undefined || e.pSide > best[e.to]) best[e.to] = e.pSide; });
-    Object.keys(best).forEach(function (sq) { placeCircle(sq, best[sq]); });
+    renderCircles(Object.keys(best).map(function (sq) { return { sq: sq, p: best[sq] }; }));
   }
   function refreshOverlay() { if (fullHeatmap) showFullHeatmap(); else clearOverlay(); }
 
   /* ======================================================================
-     SECTION: DECISION TREE DATA (for the canvas)
+     DECISION TREE DATA
      ====================================================================== */
   function buildTreeLevels() {
-    var g = new Chess();
-    var hist = game.history({ verbose: true });
-    var levels = [];
+    var g = new Chess(), hist = game.history({ verbose: true }), levels = [];
     for (var k = 0; k <= hist.length; k++) {
-      var legal = g.moves();                         // SAN list at position k
+      var legal = g.moves();
       var chosenSan = (k < hist.length) ? hist[k].san : null;
-      var snap = candidateSnapshots[k];
-      var probBySan = {};
+      var snap = candidateSnapshots[k], probBySan = {};
       if (snap) snap.forEach(function (c) { probBySan[c.san] = c.pSide; });
       var moves = legal.map(function (san) {
         return { san: san, chosen: san === chosenSan, pSide: probBySan[san] };
@@ -295,12 +410,10 @@ function cancelAllWork() {
     }
     return levels;
   }
-  function renderTree() {
-    treeView.setData(buildTreeLevels(), game.history().length);
-  }
+  function renderTree() { treeView.setData(buildTreeLevels(), game.history().length); }
 
   /* ======================================================================
-     SECTION: GAME-AS-HASH (right tile)
+     GAME-AS-HASH (right tile)
      ====================================================================== */
   function computeEntropyBits() {
     var g = new Chess(), hist = game.history({ verbose: true }), bits = 0;
@@ -366,70 +479,88 @@ function cancelAllWork() {
   }
 
   /* ======================================================================
-     SECTION: SIMULATION DRIVERS
+     POSITION REFRESH (source-driven) + BOT LOOP
      ====================================================================== */
-  function simulateTopRight() {
-  var fen = game.fen(), myGen = gen, ply = game.history().length;
-  setStatus('');
-  setProgress('Simuliere (' + pool.length + ' Threads) …');
-  return parallelSim(fen, SIM_GAMES).then(function (res) {
-    if (gen !== myGen) return;
-    updateProbabilityUI(res.pWhite, res.pDraw, res.pBlack);
-    probHistory[ply] = res.pWhite;
-    setProgress('Fertig — ' + res.total + ' Partien auf ' + pool.length + ' Threads simuliert.');
-    setExplain(
-      'Aus der aktuellen Stellung wurden <strong>' + res.total + '</strong> zufällige Partien zu Ende ' +
-      'gespielt (parallel auf <strong>' + pool.length + '</strong> Threads). Weiß gewann <strong>' +
-      res.whiteWins + '</strong>, Schwarz <strong>' + res.blackWins + '</strong>, <strong>' + res.draws +
-      '</strong> remis — das sind die <strong>Monte-Carlo-Wahrscheinlichkeiten</strong>.'
-    );
-    renderTree();
-  }).catch(function (err) {
-    if (err.message !== 'Cancelled') showError(err);
-  });
-}
-
-function computeHeatmap() {
-  if (game.game_over() || !isHuman(game.turn())) {
-    heatmapReady = false;
-    setHeatmapState(game.game_over() ? '—' : 'Bot am Zug — keine Heatmap.');
-    return;
+  function loadingLabel() {
+    if (SOURCE === 'mc-live') return 'Simuliere live (' + (pool.length || POOL_SIZE) + ' Threads) …';
+    if (SOURCE === 'lichess-live') return 'Lichess wird abgerufen …';
+    return 'Lichess-Datei wird geladen …';
   }
-  var moves = game.moves({ verbose: true });
-  if (!moves.length) return;
-  heatmapReady = false;
-  setHeatmapState('Heatmap (' + pool.length + ' Threads) …');
+  function doneLabel(res) {
+    if (SOURCE === 'mc-live') return 'Fertig — ' + (res.total || SIM_GAMES) + ' Partien auf ' + pool.length + ' Threads.';
+    var d = res.depth ? ' (Tiefe ' + res.depth + ')' : '';
+    if (SOURCE === 'lichess-live') return 'Geladen — Lichess Cloud-Eval' + d + '.';
+    return 'Geladen — Lichess Cloud-Eval, gebündelte Datei' + d + '.';
+  }
+  function explainText(res) {
+    if (SOURCE === 'mc-live') {
+      return 'Live-<strong>Monte-Carlo</strong>: aus dieser Stellung wurden <strong>' + (res.total || SIM_GAMES) +
+        '</strong> zufällige Partien (nach 64 Halbzügen gekappt, dann Materialurteil) auf <strong>' + pool.length +
+        '</strong> Threads gespielt. Die Häufigkeiten sind die Wahrscheinlichkeiten.';
+    }
+    var d = res.depth ? 'Tiefe <strong>' + res.depth + '</strong>' : 'gecachte Bewertung';
+    return 'Quelle <strong>Lichess Cloud-Eval</strong> (Stockfish, ' +
+      (SOURCE === 'lichess-file' ? 'gebündelte Datei' : 'live von lichess.org') +
+      '): die Engine-Bewertung (' + d + ') wird in <strong>Gewinnchancen</strong> umgerechnet. ' +
+      'Die Heatmap zeigt die Top-Züge der Engine.';
+  }
+  function heatmapStateText(human) {
+    if (game.game_over()) return '—';
+    if (!human) return 'Bot am Zug — Heatmap pausiert.';
+    if (!heatmapReady) return 'Keine Zugdaten für diese Stellung (' + SOURCE_LABEL[SOURCE] + ').';
+    return 'Heatmap bereit — Figur anfassen oder „Gesamte Heatmap".';
+  }
 
-  var whiteToMove = game.turn() === 'w', ply = game.history().length;
-  var jobs = moves.map(function (mv) {
-    game.move(mv); var fen = game.fen(); game.undo();
-    return { key: mv.from + mv.to, from: mv.from, to: mv.to, san: mv.san, fen: fen };
-  });
+  function refreshPosition() {
+    var fen = game.fen(), myGen = gen, ply = game.history().length, whiteToMove = game.turn() === 'w';
+    var human = isHuman(game.turn());
+    var wantMoves = !(SOURCE === 'mc-live' && !human); // skip the costly live heatmap on bot turns
+    setStatus('');
+    setProgress(loadingLabel());
 
-  var myGen = gen;
-  parallelAnalyze(jobs, HEATMAP_GAMES).then(function (results) {
-    if (gen !== myGen) return;
-    heatmapList = results.map(function (r) {
-      return { from: r.from, to: r.to, san: r.san, pWhite: r.pWhite, pDraw: r.pDraw, pBlack: r.pBlack,
-               pSide: whiteToMove ? r.pWhite : r.pBlack };
-    });
-    heatmapByFrom = {};
-    heatmapList.forEach(function (e) { (heatmapByFrom[e.from] = heatmapByFrom[e.from] || []).push(e); });
-    candidateSnapshots[ply] = heatmapList.map(function (e) { return { san: e.san, pSide: e.pSide }; });
-    heatmapReady = true;
-    setHeatmapState('Heatmap bereit — Figur anfassen oder „Gesamte Heatmap“.');
-    renderTree();
-    refreshOverlay();
-  }).catch(function (err) {
-    if (err.message !== 'Cancelled') showError(err);
-  });
-}
+    getPosition(fen, { wantMoves: wantMoves }).then(function (res) {
+      if (gen !== myGen) return;
+      if (!res || !res.ok || !res.sim) { handleNoData(res, ply); renderTree(); return; }
 
-  /* ======================================================================
-     SECTION: POSITION-CHANGE PIPELINE + BOT LOOP
-     ====================================================================== */
+      updateProbabilityUI(res.sim.pWhite, res.sim.pDraw, res.sim.pBlack);
+      probHistory[ply] = res.sim.pWhite;
+
+      heatmapList = (res.moves || []).map(function (m) {
+        return { from: m.from, to: m.to, san: m.san, pWhite: m.pWhite, pDraw: m.pDraw, pBlack: m.pBlack,
+                 pSide: whiteToMove ? m.pWhite : m.pBlack };
+      });
+      heatmapByFrom = {};
+      heatmapList.forEach(function (e) { (heatmapByFrom[e.from] = heatmapByFrom[e.from] || []).push(e); });
+      candidateSnapshots[ply] = heatmapList.length
+        ? heatmapList.map(function (e) { return { san: e.san, pSide: e.pSide }; }) : undefined;
+
+      heatmapReady = human && !game.game_over() && heatmapList.length > 0;
+      setHeatmapState(heatmapStateText(human));
+      setProgress(doneLabel(res));
+      setExplain(explainText(res));
+      renderTree();
+      refreshOverlay();
+    }).catch(function (err) { if (gen === myGen) showError(err); });
+  }
+
+  function handleNoData(res, ply) {
+    setProbUnknown();
+    heatmapList = []; heatmapByFrom = {}; heatmapReady = false;
+    candidateSnapshots[ply] = undefined;
+    clearOverlay();
+    var reason = res && res.reason;
+    if (reason === 'unavailable') {
+      setProgress((res.message || 'Quelle nicht erreichbar') + ' — andere Datenquelle wählen.');
+    } else {
+      setProgress('Keine vorab berechneten Daten für diese Stellung (' + SOURCE_LABEL[SOURCE] + '). Tipp: Monte-Carlo · live wählen.');
+    }
+    setExplain('Diese Stellung liegt außerhalb der gewählten Quelle. Mit <strong>Monte-Carlo · live</strong> ' +
+      'lässt sich jede Stellung simulieren; die Lichess-Quellen decken vor allem Eröffnung und frühes Mittelspiel ab.');
+    setHeatmapState('—');
+  }
+
   function onPositionChanged() {
-    cancelAllWork();        // bumps gen, rebuilds pool (drops stale work)
+    gen++;                  // soft-cancel any in-flight work
     var myGen = gen;
     clearOverlay();
     heatmapList = []; heatmapByFrom = {}; heatmapReady = false;
@@ -440,13 +571,9 @@ function computeHeatmap() {
 
     if (handleGameOver()) { renderTree(); return; }
 
-    simulateTopRight();     // top-right probabilities (parallel)
-    computeHeatmap();       // background heatmap (only if a human is to move)
+    refreshPosition();
 
-    // If it's a bot's turn, play after a short, watchable delay.
     if (!isHuman(game.turn())) {
-      var who = game.turn() === 'w' ? 'Weiß' : 'Schwarz';
-      setProgress('Bot (' + who + ', Minimax Tiefe ' + BOT_DEPTH + ') denkt nach …');
       delay(BOT_DELAY_MS).then(function () {
         if (gen !== myGen || game.game_over()) return;
         try {
@@ -458,8 +585,18 @@ function computeHeatmap() {
     }
   }
 
+  // Re-evaluate the current position without touching the game / bot loop.
+  function reevaluate() {
+    gen++;
+    clearOverlay();
+    heatmapList = []; heatmapByFrom = {}; heatmapReady = false;
+    renderTree();
+    if (handleGameOver()) { renderTree(); return; }
+    refreshPosition();
+  }
+
   /* ======================================================================
-     SECTION: BOARD EVENTS (drag only the side to move, and only if human)
+     BOARD EVENTS
      ====================================================================== */
   function onDragStart(source, piece) {
     if (game.game_over()) return false;
@@ -479,7 +616,7 @@ function computeHeatmap() {
   function onSnapEnd() { board.position(game.fen()); }
 
   /* ======================================================================
-     SECTION: CONTROLS
+     CONTROLS
      ====================================================================== */
   function toggleFullHeatmap() {
     fullHeatmap = !fullHeatmap;
@@ -498,18 +635,19 @@ function computeHeatmap() {
       onPositionChanged();
     } catch (e) { showError(e); }
   }
-  function onModeChange() {
-    MODE = $['mode-select'].value;
-    newGame();
+  function onModeChange() { MODE = $['mode-select'].value; newGame(); }
+  function onSourceChange() {
+    SOURCE = $['source-select'].value;
+    if (SOURCE === 'mc-live') ensurePool(); else teardownPool();
+    reevaluate();
   }
 
   /* ======================================================================
-     SECTION: BOOTSTRAP
+     BOOTSTRAP
      ====================================================================== */
   function init() {
     try {
       cacheDom();
-      buildPool();
       game = new Chess();
       treeView = new TreeView($['tree-canvas']);
 
@@ -527,6 +665,10 @@ function computeHeatmap() {
       $['btn-tree-reset'].addEventListener('click', function () { treeView.resetView(); });
       $['mode-select'].addEventListener('change', onModeChange);
       $['mode-select'].value = MODE;
+      $['source-select'].addEventListener('change', onSourceChange);
+      $['source-select'].value = SOURCE;
+
+      if (SOURCE === 'mc-live') ensurePool();
 
       window.addEventListener('resize', function () { board.resize(); refreshOverlay(); });
 
